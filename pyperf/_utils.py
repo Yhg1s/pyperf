@@ -17,6 +17,16 @@ MS_WINDOWS = (sys.platform == 'win32')
 MAC_OS = (sys.platform == 'darwin')
 BSD = ('bsd' in sys.platform)
 
+
+class NoCalibrationError(Exception):
+    """
+    --no-calibrate was given and something was about to calibrate anyway.
+
+    Lives here rather than beside CLIError so that the manager and the worker
+    can both raise it without importing the runner.
+    """
+
+
 if MS_WINDOWS:
     import msvcrt
 

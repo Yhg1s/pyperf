@@ -7,7 +7,8 @@ import pyperf
 from pyperf._formatter import (format_number, format_value, format_values,
                                format_timedelta)
 from pyperf._hooks import instantiate_selected_hooks
-from pyperf._utils import MS_WINDOWS, percentile, median_abs_dev
+from pyperf._utils import (MS_WINDOWS, NoCalibrationError, percentile,
+                           median_abs_dev)
 from pyperf._system import OS_LINUX
 
 
@@ -240,6 +241,13 @@ class WorkerTask:
 
     def calibrate_loops(self):
         args = self.args
+        if args.no_calibrate:
+            # The manager decides whether a worker calibrates and refuses to
+            # ask for it under --no-calibrate, so this is a backstop for a
+            # worker invoked some other way.
+            raise NoCalibrationError(
+                "--no-calibrate: %r was asked to calibrate its loop count"
+                % self.name)
         if not args.recalibrate_loops:
             self.loops = 1
 
