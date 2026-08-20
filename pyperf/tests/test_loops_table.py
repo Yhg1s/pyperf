@@ -20,6 +20,7 @@ DEFAULT_LOOPS_BENCH = os.path.join(
     TESTDIR, 'loops_table_default_loops_bench.py')
 FAILING_BENCH = os.path.join(TESTDIR, 'loops_table_failing_bench.py')
 NOISY_BENCH = os.path.join(TESTDIR, 'loops_table_noisy_bench.py')
+BYPASS_BENCH = os.path.join(TESTDIR, 'loops_table_bypass_bench.py')
 
 
 def write_table(directory, loops, min_time=0.1,
@@ -473,6 +474,144 @@ class TestSharedLoopsWarning(unittest.TestCase):
         with tests.temporary_directory() as tmpdir:
             self.assertEqual(
                 self.run_script(tmpdir, DEFAULT_LOOPS_BENCH), '')
+
+
+class TestNoCalibrate(unittest.TestCase):
+    """
+    --no-calibrate turns the fall back to calibration into an error.
+    """
+
+    def run_script(self, tmpdir, *args, script=BENCH):
+        output = os.path.join(tmpdir, 'out.json')
+        if os.path.exists(output):
+            os.unlink(output)
+        cmd = [sys.executable, script, '-p', '1', '-n', '1', '-w', '0',
+               '--quiet', '-o', output, *args]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc
+
+    def test_needs_a_loop_count_from_somewhere(self):
+        with tests.temporary_directory() as tmpdir:
+            proc = self.run_script(tmpdir, '--no-calibrate')
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn('--no-calibrate needs a loop count',
+                          proc.stdout + proc.stderr)
+
+    def test_explicit_loops_is_enough(self):
+        with tests.temporary_directory() as tmpdir:
+            proc = self.run_script(tmpdir, '--no-calibrate', '--loops', '128')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_complete_table_is_enough(self):
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir,
+                                {'fast_bench': 2 ** 27, 'slow_bench': 128})
+            proc = self.run_script(tmpdir, '--no-calibrate',
+                                   '--loops-table', table)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            suite = pyperf.BenchmarkSuite.load(
+                os.path.join(tmpdir, 'out.json'))
+            self.assertEqual(
+                {b.get_name(): b.get_metadata().get('loops') for b in suite},
+                {'fast_bench': 2 ** 27, 'slow_bench': 128})
+
+    def test_a_benchmark_missing_from_the_table_is_an_error(self):
+        # Without --no-calibrate this is the silent fall back that
+        # test_a_benchmark_missing_from_the_table_still_calibrates covers.
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir, {'fast_bench': 2 ** 27})
+            proc = self.run_script(tmpdir, '--no-calibrate',
+                                   '--loops-table', table)
+            self.assertNotEqual(proc.returncode, 0)
+            out = proc.stdout + proc.stderr
+            self.assertIn("'slow_bench' is not in --loops-table", out)
+
+    def test_the_error_names_the_benchmark_not_just_the_table(self):
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir, {'slow_bench': 128})
+            proc = self.run_script(tmpdir, '--no-calibrate',
+                                   '--loops-table', table)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("'fast_bench'", proc.stdout + proc.stderr)
+
+    def test_without_the_flag_a_missing_entry_still_calibrates(self):
+        # The flag is opt-in: the default behaviour is unchanged.
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir, {'fast_bench': 2 ** 27})
+            proc = self.run_script(tmpdir, '--loops-table', table)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_run_that_calibrates_nothing_is_unaffected(self):
+        # --no-calibrate must not change any recorded number, only refuse.
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir,
+                                {'fast_bench': 2 ** 27, 'slow_bench': 128})
+            self.run_script(tmpdir, '--loops-table', table)
+            without = pyperf.BenchmarkSuite.load(
+                os.path.join(tmpdir, 'out.json'))
+            self.run_script(tmpdir, '--no-calibrate', '--loops-table', table)
+            with_flag = pyperf.BenchmarkSuite.load(
+                os.path.join(tmpdir, 'out.json'))
+
+            def loops(suite):
+                return {b.get_name(): b.get_metadata().get('loops')
+                        for b in suite}
+            self.assertEqual(loops(without), loops(with_flag))
+
+
+class TestNoCalibrateBackstops(unittest.TestCase):
+    """
+    --no-calibrate is checked again where the decision to calibrate is made.
+
+    The dispatch-time check in _main() and the manager both look the reported
+    name up in the same table, so in practice the dispatch check catches
+    everything the manager would. These cover the manager and the worker
+    refusing on their own account, so that a path which reaches them without
+    passing the dispatch check still cannot calibrate.
+    """
+
+    def run_script(self, tmpdir, *args, script=BENCH):
+        cmd = [sys.executable, script, '-p', '1', '-n', '1', '-w', '0',
+               '--quiet', *args]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def test_a_name_the_table_spells_differently_is_caught(self):
+        # The table names the benchmark 'bench_slow', the script reports
+        # 'slow_bench'. The lookup misses, so it would calibrate.
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir, {'fast_bench': 2 ** 27,
+                                         'bench_slow': 128})
+            proc = self.run_script(tmpdir, '--no-calibrate',
+                                   '--loops-table', table)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("'slow_bench' is not in --loops-table",
+                          proc.stdout + proc.stderr)
+
+    def test_the_manager_refuses_even_if_dispatch_let_it_through(self):
+        with tests.temporary_directory() as tmpdir:
+            table = write_table(tmpdir, {'fast_bench': 2 ** 27})
+            proc = self.run_script(tmpdir, '--no-calibrate',
+                                   '--loops-table', table,
+                                   script=BYPASS_BENCH)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("would calibrate its loop count",
+                          proc.stdout + proc.stderr)
+
+    def test_the_worker_refuses_when_told_to_calibrate(self):
+        # A worker is normally only told to calibrate by a manager that has
+        # already checked. Ask one directly.
+        cmd = [sys.executable, SINGLE_BENCH, '--worker', '--no-calibrate',
+               '--calibrate-loops', '--pipe', '1', '-n', '1', '-w', '1']
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("was asked to calibrate its loop count",
+                      proc.stdout + proc.stderr)
+
+    def test_a_worker_given_a_loop_count_is_unaffected(self):
+        cmd = [sys.executable, SINGLE_BENCH, '--worker', '--no-calibrate',
+               '--loops', '128', '--pipe', '1', '-n', '1', '-w', '1']
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ import subprocess
 from pyperf._bench import _load_suite_from_pipe
 from pyperf._cli import format_run
 from pyperf._formatter import format_number
-from pyperf._utils import MS_WINDOWS, create_environ, create_pipe, popen_killer
+from pyperf._utils import (MS_WINDOWS, NoCalibrationError, create_environ,
+                           create_pipe, popen_killer)
 
 
 EXIT_TIMEOUT = 60
@@ -43,6 +44,13 @@ class Manager:
         self.calibrate_loops = int(not (self.explicit_loops
                                         or self.table_loops))
         self.calibrate_warmups = int(self.args.warmups is None)
+        if self.args.no_calibrate and self.calibrate_loops:
+            # The runner refuses this before dispatching a benchmark, so
+            # reaching here means something got past that. Refuse at the point
+            # the decision is actually made rather than trusting the caller.
+            raise NoCalibrationError(
+                "--no-calibrate: %r would calibrate its loop count"
+                % runner._current_name)
 
     @property
     def explicit_loops(self):
@@ -81,6 +89,8 @@ class Manager:
             cmd.extend(('--warmups', str(args.warmups)))
             if calibrate_warmups > 1:
                 cmd.append('--recalibrate-warmups')
+        if args.no_calibrate:
+            cmd.append('--no-calibrate')
         if args.verbose:
             cmd.append('-' + 'v' * args.verbose)
         if args.affinity:

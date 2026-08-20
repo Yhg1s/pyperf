@@ -12,7 +12,7 @@ from pyperf._cpu_utils import (format_cpu_list, parse_cpu_list,
                                set_highest_priority)
 from pyperf._formatter import format_timedelta
 from pyperf._hooks import get_hook_names
-from pyperf._utils import (MS_WINDOWS, abs_executable,
+from pyperf._utils import (MS_WINDOWS, NoCalibrationError, abs_executable,
                            WritePipe, get_python_names,
                            merge_profile_stats)
 from pyperf._system import OS_LINUX
@@ -189,6 +189,10 @@ class Runner:
                                  'a JSON file (see "pyperf loops_table") ')
         parser.add_argument('--print-loops', action="store_true",
                             help='calibrate, then print the resulting loops')
+        parser.add_argument('--no-calibrate', action="store_true",
+                            help='refuse to calibrate: every benchmark '
+                                 'function must get its loops from '
+                                 '--loops-table or --loops')
         parser.add_argument('-v', '--verbose', action="store_true",
                             help='enable verbose mode')
         parser.add_argument('-q', '--quiet', action="store_true",
@@ -416,6 +420,14 @@ class Runner:
                           % (args.loops_table, len(self._loops_table.loops),
                              self._loops_table.describe_machine()))
 
+        if args.no_calibrate and not args.worker:
+            # Checked here rather than per benchmark so the run fails before it
+            # starts, not part-way through a suite.
+            if not args.loops_table and not self._loops_from_cli:
+                raise CLIError("--no-calibrate needs a loop count to use "
+                               "instead: pass --loops-table FILENAME or "
+                               "--loops=N")
+
         args.python = abs_executable(args.python)
         if args.compare_to:
             args.compare_to = abs_executable(args.compare_to)
@@ -520,6 +532,24 @@ class Runner:
             return None
         return self._loops_table.loops_for(name)
 
+    def _check_no_calibrate(self, name):
+        """
+        Refuse to run `name` if it would have to calibrate its loop count.
+
+        A table need not list every benchmark; one it does not list falls back
+        to calibration, which is the fallback --no-calibrate exists to catch.
+        Workers are exempt: the manager passes them --loops, so by then the
+        count has already been decided.
+        """
+        args = self.args
+        if not args.no_calibrate or args.worker:
+            return
+        if self._table_loops(name) or self._loops_from_cli:
+            return
+        raise CLIError("--no-calibrate: %r is not in --loops-table %s, so it "
+                       "would be calibrated. Add it to the table, or drop "
+                       "--no-calibrate." % (name, args.loops_table))
+
     def _warn_shared_loops(self):
         """
         Warn when one --loops is being stretched over several benchmarks.
@@ -561,6 +591,11 @@ class Runner:
 
         args = self.parse_args()
         try:
+            self._check_no_calibrate(task.name)
+        except CLIError as exc:
+            print("ERROR: %s" % exc)
+            sys.exit(1)
+        try:
             if args.worker:
                 bench = self._worker(task)
             elif args.compare_to:
@@ -568,6 +603,12 @@ class Runner:
                 bench = None
             else:
                 bench = self._manager()
+        except NoCalibrationError as exc:
+            # The backstop in the manager or the worker fired, meaning the
+            # check above missed a way of reaching calibration. Report it the
+            # same way rather than as a traceback.
+            print("ERROR: %s" % exc)
+            sys.exit(1)
         except KeyboardInterrupt:
             what = "Benchmark worker" if args.worker else "Benchmark"
             print("%s interrupted: exit" % what, file=sys.stderr)
