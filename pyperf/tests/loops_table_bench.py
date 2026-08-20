@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Two benchmarks whose loop counts differ by orders of magnitude."""
 import pyperf
 
 runner = pyperf.Runner()

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""One benchmark, for the cases where a second would only add noise."""
 import pyperf
 
 runner = pyperf.Runner()
