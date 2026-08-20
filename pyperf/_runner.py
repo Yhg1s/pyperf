@@ -16,6 +16,7 @@ from pyperf._utils import (MS_WINDOWS, abs_executable,
                            WritePipe, get_python_names,
                            merge_profile_stats)
 from pyperf._system import OS_LINUX
+from pyperf import _loops_table as loops_table
 from pyperf._worker import WorkerProcessTask
 
 
@@ -123,6 +124,21 @@ class Runner:
         # result of argparser.parse_args()
         self.args = None
 
+        # Loop counts from --loops-table, read once in _process_args_impl().
+        self._loops_table = None
+
+        # Name of the benchmark being run, so that the manager can look its
+        # loop count up in the table.
+        self._current_name = None
+
+        # Whether --loops was given on the command line, as opposed to a
+        # default a benchmark set by passing loops= to Runner(). Only the
+        # former should override a loops table.
+        self._loops_from_cli = False
+
+        # Whether _warn_shared_loops() has already spoken.
+        self._warned_shared_loops = False
+
         # callback used to prepare command line arguments to spawn a worker
         # child process. The callback is called with prepare(runner.args, cmd).
         # args must be modified in-place.
@@ -168,6 +184,11 @@ class Runner:
                             help='number of loops per value, 0 means '
                                  'automatic calibration (default: %s)'
                             % loops)
+        parser.add_argument('--loops-table', metavar='FILENAME',
+                            help='fix the number of loops per benchmark from '
+                                 'a JSON file (see "pyperf loops_table") ')
+        parser.add_argument('--print-loops', action="store_true",
+                            help='calibrate, then print the resulting loops')
         parser.add_argument('-v', '--verbose', action="store_true",
                             help='enable verbose mode')
         parser.add_argument('-q', '--quiet', action="store_true",
@@ -276,7 +297,14 @@ class Runner:
     def _process_args_impl(self):
         args = self.args
 
-        if args.pipe:
+        # debug-single-value sets loops to 1, so we have to check this early.
+        self._loops_from_cli = (
+            args.loops != self.argparser.get_default('loops'))
+        requested_min_time = args.min_time
+
+        if args.pipe or args.print_loops:
+            # Both make the output machine-readable, so the progress dots and
+            # the per-run reporting have to go, exactly as --pipe already does.
             args.quiet = True
             args.verbose = False
         elif args.quiet:
@@ -359,6 +387,34 @@ class Runner:
             if err_msg:
                 raise CLIError("unable to track the memory usage "
                                "(--track-memory): %s" % err_msg)
+
+        if args.print_loops:
+            for option in ('output', 'append', 'pipe'):
+                if getattr(args, option):
+                    raise CLIError("--print-loops writes no results, so it is "
+                                   "incompatible with --%s" % option)
+
+        if args.loops_table:
+            if self._loops_from_cli:
+                raise CLIError("--loops=N is incompatible with --loops-table "
+                               "(--loops already skips calibration)")
+            self._loops_table = loops_table.load_or_none(args.loops_table)
+
+            problems = self._loops_table.check_matches(requested_min_time)
+            if problems:
+                raise CLIError("cannot use --loops-table %s: %s"
+                               % (args.loops_table, '; '.join(problems)))
+
+            if not args.worker:
+                other = self._loops_table.other_machine()
+                if other:
+                    print("WARNING: --loops-table %s was generated on %s, not "
+                          "this machine." % (args.loops_table, other),
+                          file=sys.stderr)
+                if args.verbose:
+                    print("Loops table: %s, %s benchmarks, generated on %s"
+                          % (args.loops_table, len(self._loops_table.loops),
+                             self._loops_table.describe_machine()))
 
         args.python = abs_executable(args.python)
         if args.compare_to:
@@ -456,10 +512,52 @@ class Runner:
 
         return True
 
+    def _table_loops(self, name):
+        """
+        Loop count for `name` from --loops-table, or None to calibrate.
+        """
+        if self._loops_table is None:
+            return None
+        return self._loops_table.loops_for(name)
+
+    def _warn_shared_loops(self):
+        """
+        Warn when one --loops is being stretched over several benchmarks.
+
+        --loops is a single value for a whole process, but the right loop count
+        is a property of each benchmark, and benchmarks in one script are not
+        alike: across pyperformance's multi-benchmark scripts the counts
+        calibration picks differ by up to 512x. One value therefore leaves the
+        cheap ones measured over too short a chunk to be worth much.
+        """
+        # A script does not say up front how many benchmark functions it has
+        # so there is nothing to check until a second one appears. That is
+        # when this fires, and only then.
+        if self._warned_shared_loops:
+            return
+        if not self._loops_from_cli or len(self._bench_names) < 2:
+            return
+        if self.args.worker:
+            return
+
+        self._warned_shared_loops = True
+        print(file=sys.stderr)
+        print("WARNING: --loops=%s applies to every benchmark function in "
+              "this script, and more than one is being run (%s so far)."
+              % (self.args.loops,
+                 ', '.join(sorted(self._bench_names))),
+              file=sys.stderr)
+        print("They are unlikely to want the same loop count. Use "
+              "--loops-table to give each its own, or drop --loops and let "
+              "each calibrate.", file=sys.stderr)
+        sys.stderr.flush()
+
     def _main(self, task):
         if task.name in self._bench_names:
             raise ValueError("duplicated benchmark name: %r" % task.name)
         self._bench_names.add(task.name)
+        self._warn_shared_loops()
+        self._current_name = task.name
 
         args = self.parse_args()
         try:
@@ -643,6 +741,19 @@ class Runner:
 
     def _display_result(self, bench, checks=True):
         args = self.args
+
+        if args.print_loops:
+            # "name<TAB>count", behind a marker. The marker matters: the
+            # script owns stdout too, and anything it prints at import time
+            # is re-printed by every process spawned for calibration. Without
+            # it, a script that happens to print "word<TAB>digits" would be
+            # read back as a benchmark, and a wrong loop count is silent.
+            loops = bench.get_metadata().get('loops')
+            if loops:
+                print("%s\t%s\t%s"
+                      % (loops_table.LOOPS_MARKER, bench.get_name(), loops))
+                sys.stdout.flush()
+            return
 
         # Display the average +- stdev
         if self.args.quiet:

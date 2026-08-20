@@ -1,3 +1,4 @@
+import os.path
 import sys
 import subprocess
 
@@ -35,8 +36,27 @@ class Manager:
         self.need_nprocess = self.args.processes
         self.nprocess = 0
         self.next_run = 'loops'
-        self.calibrate_loops = int(not self.args.loops)
+        # A loop count from --loops-table stands in for calibrating one: it is
+        # per benchmark, unlike --loops, because each benchmark function gets
+        # its own Manager.
+        self.table_loops = runner._table_loops(runner._current_name)
+        self.calibrate_loops = int(not (self.explicit_loops
+                                        or self.table_loops))
         self.calibrate_warmups = int(self.args.warmups is None)
+
+    @property
+    def explicit_loops(self):
+        """
+        The loop count to pass a worker, ignoring the table.
+
+        A benchmark that passes loops= to Runner() sets a default, not a
+        request, and a table entry is more specific than a default, so it
+        wins. An explicit --loops is rejected earlier and never gets here.
+
+        Read live rather than snapshotted: when there is no table, calibration
+        feeds its result back into args.loops between workers.
+        """
+        return 0 if self.table_loops else self.args.loops
 
     def worker_cmd(self, calibrate_loops, calibrate_warmups, wpipe):
         args = self.args
@@ -50,7 +70,9 @@ class Manager:
         if calibrate_loops == 1:
             cmd.append('--calibrate-loops')
         else:
-            cmd.extend(('--loops', str(args.loops)))
+            loops = self.table_loops or self.explicit_loops
+            assert loops, "worker asked for a run with no loop count"
+            cmd.extend(('--loops', str(loops)))
             if calibrate_loops > 1:
                 cmd.append('--recalibrate-loops')
         if calibrate_warmups == 1:
@@ -150,6 +172,15 @@ class Manager:
         if len(worker_bench._runs) != 1:
             raise ValueError("worker produced %s runs, only 1 run expected"
                              % len(worker_bench._runs))
+
+        if self.table_loops:
+            # Record that this count was read rather than measured. The worker
+            # is only told a number, so only the manager knows.
+            worker_bench.update_metadata({
+                'loops_table': os.path.basename(self.args.loops_table),
+                'loops_table_id': self.runner._loops_table.content_id(),
+            })
+
         run = worker_bench._runs[0]
 
         # save the run into bench

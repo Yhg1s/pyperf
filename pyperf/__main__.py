@@ -14,6 +14,7 @@ from pyperf._formatter import format_timedelta, format_seconds, format_datetime
 from pyperf._cpu_utils import parse_cpu_list
 from pyperf._timeit_cli import TimeitRunner
 from pyperf._utils import parse_run_list
+from pyperf._loops_table import cmd_loops_table
 
 
 def add_cmdline_args(cmd, args):
@@ -194,6 +195,38 @@ def create_parser():
     cmd.add_argument('-n', type=int, default=5,
                      help='Number of slow benchmarks to display (default: 5)')
     input_filenames(cmd, name=False)
+
+    # loops_table
+    cmd = subparsers.add_parser(
+        'loops_table',
+        help='Calibrate benchmarks once and record their loop counts, so '
+             'that later runs can reuse them with --loops-table instead of '
+             'calibrating again')
+    cmd.add_argument('-o', '--output', required=True, metavar='FILENAME',
+                     help='Write the table to FILENAME')
+    cmd.add_argument('--append', action='store_true',
+                     help='Add to an existing table rather than replacing it, '
+                          'so a suite can be built up a script at a time')
+    cmd.add_argument('--min-time', type=float, default=0.1,
+                     help='Minimum duration of a single value, the thing the '
+                          'loop counts are calibrated against. Must match '
+                          'what later runs use (default: 0.1)')
+    cmd.add_argument('--python', default=None,
+                     help='Python to calibrate with (default: this one)')
+    cmd.add_argument('-v', '--verbose', action='store_true',
+                     help='Show the commands being run')
+    cmd.add_argument('scripts', nargs='+', metavar='SCRIPT',
+                     help='Benchmark scripts to calibrate')
+    # REMAINDER rather than nargs='*': the arguments a benchmark script needs
+    # are usually options, and an option after nargs='*' is claimed by this
+    # parser instead of being forwarded. Everything after the separator is
+    # passed through untouched.
+    cmd.add_argument('--script-args', nargs=argparse.REMAINDER, default=[],
+                     metavar='ARG',
+                     help='Everything after this is passed to every script, '
+                          'for one that needs arguments to choose what to '
+                          'run. Must come last, and may include options: '
+                          '--script-args --pure-python pickle')
 
     # command
     cmd = subparsers.add_parser('command',
@@ -753,6 +786,7 @@ def main():
         'slowest': functools.partial(cmd_slowest, args),
         'system': functools.partial(cmd_system, args),
         'command': functools.partial(cmd_bench_command, command_runner, args),
+        'loops_table': functools.partial(cmd_loops_table, args),
     }
 
     with catch_broken_pipe_error():
